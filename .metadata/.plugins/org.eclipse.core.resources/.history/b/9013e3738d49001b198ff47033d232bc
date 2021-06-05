@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>2.3.5.RELEASE</version>
+		<relativePath /> <!-- lookup parent from repository -->
+	</parent>
+	<groupId>com.haud.xchange</groupId>
+	<artifactId>http-in-rest-service</artifactId>
+	<version>${revision}</version>
+	<packaging>jar</packaging>
+	<name>Http In Rest Service</name>
+	<description>Http In Rest Service</description>
+
+	<properties>
+		<project.handle>http-in-rest-service</project.handle>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+		<revision>local</revision>
+		<java.version>11</java.version>
+		<maven.compiler.source>${java.version}</maven.compiler.source>
+		<maven.compiler.target>${java.version}</maven.compiler.target>
+		<io.jsonwebtoken.version>0.1.8.0</io.jsonwebtoken.version>
+		<application.jar.name>${project.groupId}-${project.artifactId}-${project.version}</application.jar.name>
+		<sonar.sources>src/main</sonar.sources>
+		<sonar.tests>src/test</sonar.tests>
+		<sonar.sourceEncoding>UTF-8</sonar.sourceEncoding>
+	</properties>
+
+	<dependencies>
+		
+    </dependencies>
+	<build>
+		<defaultGoal>package</defaultGoal>
+		<directory>${project.basedir}/target</directory>
+		<finalName>${project.handle}_${project.version}</finalName>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+		</plugins>
+	</build>
+	<repositories>
+		<repository>
+			<id>maven-releases</id>
+			<url>http://nexus.haud.report:8081/repository/maven-releases</url>
+		</repository>
+		<repository>
+			<id>maven-snapshot</id>
+			<url>http://nexus.haud.report:8081/repository/maven-snapshots</url>
+		</repository>
+	</repositories>
+	<distributionManagement>
+		<repository>
+			<uniqueVersion>true</uniqueVersion>
+			<id>maven-releases</id>
+			<url>http://nexus.haud.report:8081/repository/maven-releases</url>
+		</repository>
+		<snapshotRepository>
+			<uniqueVersion>true</uniqueVersion>
+			<id>maven-snapshots</id>
+			<url>http://nexus.haud.report:8081/repository/maven-snapshots</url>
+		</snapshotRepository>
+	</distributionManagement>
+	<dependencyManagement>
+		<dependencies>
+			<dependency>
+				<groupId>org.springframework.cloud</groupId>
+				<artifactId>spring-cloud-dependencies</artifactId>
+				<version>Hoxton.SR6</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+</project>

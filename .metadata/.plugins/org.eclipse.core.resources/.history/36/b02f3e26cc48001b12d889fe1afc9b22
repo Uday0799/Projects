@@ -1,0 +1,412 @@
+package com.haud.xchange.http_in.services;
+
+import com.haud.xchange.http_in.authentication.AuthenticationFilter;
+import com.haud.xchange.http_in.config.HttpInRedisConfig;
+import com.haud.xchange.http_in.config.HttpInSenderRabbitMQConfig;
+import com.haud.xchange.http_in.config.RabbitMQConfig;
+import com.haud.xchange.http_in.entities.ClientConnectionRest;
+import com.haud.xchange.http_in.enums.Encoding;
+import com.haud.xchange.http_in.enums.SenderType;
+import com.haud.xchange.http_in.enums.Status;
+import com.haud.xchange.http_in.redisson.RedisConnectionInfo;
+import com.haud.xchange.http_in.repository.ClientConnectionRestRepository;
+import com.haud.xchange.http_in.repository.RedissonRepository;
+import com.haud.xchange.http_in.request.dto.Destination;
+import com.haud.xchange.http_in.request.dto.Destinations;
+import com.haud.xchange.http_in.request.dto.From;
+import com.haud.xchange.http_in.request.dto.Message;
+import com.haud.xchange.http_in.response.dto.ErrorResponse;
+import com.haud.xchange.http_in.stats.ApplicationStatistics;
+import com.haud.xchange.http_in.stats.HttpInStatsHandler;
+import com.haud.xchange.http_in.utils.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.listener.AbstractMessageListenerContainer;
+import org.springframework.amqp.rabbit.listener.RabbitListenerEndpointRegistry;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+import java.io.UnsupportedEncodingException;
+import java.nio.ByteBuffer;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Pattern;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.validation.Valid;
+
+@RestController
+@RequestMapping()
+public class HttpRestService {
+
+    private static final Logger logger = LoggerFactory.getLogger(HttpRestService.class);
+
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+
+    @Autowired
+    private HttpInSenderRabbitMQConfig httpInSenderRabbitMQConfig;
+
+    @Autowired
+    private HttpInStatsHandler httpInStatsHandler;
+
+    @Autowired
+    private AuthenticationFilter authenticationFilter;
+
+    @Autowired
+    private ClientConnectionRestRepository clientConnectionRestRepository;
+
+    @Autowired
+    private RedissonRepository repo;
+
+    @Autowired
+    private ApplicationStatistics appStats;
+    
+    @Value("${http-in.redisson.queueKey}")
+	private String queuesListKey;
+
+    /**
+     * 
+     * @param request
+     * @param response
+     * @param destination
+     * @return
+     */
+    @PostMapping(value = "/v2/sms", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Object sendMessage(HttpServletRequest request, HttpServletResponse response,
+            @Valid @RequestBody Destination destination) {
+
+        // sending message to the RabbitMQ using rabbitTemplate.
+        logger.info("Http Message Received, Content: {}", destination);
+        UUID requestId = UUID.randomUUID();
+        try {
+            HttpStatus status = authenticationFilter.checkForToken(request);
+            if (status != null) {
+                return new ResponseEntity<String>(status.toString(), status);
+            }
+        } catch (Exception ex) {
+            logger.error(ex.getMessage());
+            return new ResponseEntity<String>("UNAUTHORIZED", HttpStatus.UNAUTHORIZED);
+        }
+
+        String reason = null;
+
+        // Destination parameters validation....!
+
+        if (destination.getDestinations() == null) {
+            return new ResponseEntity<ErrorResponse>(
+                    new ErrorResponse(requestId, "Destination parameter is missing.", "failed"),
+                    HttpStatus.BAD_REQUEST);
+
+        }
+
+        // Destinations class input parameters validation....!
+        List<Destinations> destinations = destination.getDestinations();
+        for (Destinations dest : destinations) {
+            if (dest.getNumber() == null || dest.getNumber().isEmpty()) {
+                return new ResponseEntity<ErrorResponse>(
+                        new ErrorResponse(requestId, "Number parameter is missing.", "failed"), HttpStatus.BAD_REQUEST);
+
+            }
+        }
+
+        // From class input parameters validation....!
+        if (destination.getFrom() == null) {
+            return new ResponseEntity<ErrorResponse>(
+                    new ErrorResponse(requestId, "From parameter is missing.", "failed"), HttpStatus.BAD_REQUEST);
+
+        } else {
+            From from = destination.getFrom();
+            SenderType senderType = from.getSenderType();
+            String sender = from.getSender();
+            if (senderType != null && sender != null) {
+
+                if (senderType == SenderType.numeric) {
+                    if (!sender.matches("[0-9]{1,14}") || sender.isEmpty())
+                        return new ResponseEntity<ErrorResponse>(
+                                new ErrorResponse(requestId,
+                                        "sender format is wrong/value not provided for numeric sender type.", "failed"),
+                                HttpStatus.BAD_REQUEST);
+
+                } else if (senderType == SenderType.alphanumeric) {
+                    if (!sender.matches("[a-zA-Z0-9]{1,11}") || sender.isEmpty())
+                        return new ResponseEntity<ErrorResponse>(new ErrorResponse(requestId,
+                                "sender format is wrong/value not provided for alphanumeric sender type.", "failed"),
+                                HttpStatus.BAD_REQUEST);
+
+                } else if (senderType == SenderType.auto) {
+                    if (!sender.matches("[a-zA-Z0-9]") || sender.isEmpty())
+                        return new ResponseEntity<ErrorResponse>(
+                                new ErrorResponse(requestId,
+                                        "sender format is wrong/value not provided for auto sender type.", "failed"),
+                                HttpStatus.BAD_REQUEST);
+
+                } else if (senderType == SenderType.shortcode) {
+                    if (!sender.matches("^(?:7575|[0-9&]{1,6})$") || sender.isEmpty())
+                        return new ResponseEntity<ErrorResponse>(
+                                new ErrorResponse(requestId,
+                                        "sender format is wrong/value not provided for auto sender type.", "failed"),
+                                HttpStatus.BAD_REQUEST);
+
+                } else {
+                    return new ResponseEntity<ErrorResponse>(
+                            new ErrorResponse(requestId, "Unsupported senderType.", "failed"), HttpStatus.BAD_REQUEST);
+
+                }
+            } else {
+                logger.info("senderType: {}", senderType);
+                return new ResponseEntity<ErrorResponse>(
+                        new ErrorResponse(requestId, "sender/senderType is missing.", "failed"),
+                        HttpStatus.BAD_REQUEST);
+
+            }
+
+        }
+        // Destination Message parameters validation....!
+        if (destination.getMessage() == null) {
+            return new ResponseEntity<ErrorResponse>(
+                    new ErrorResponse(requestId, "Message parameters is missing", "failed"), HttpStatus.BAD_REQUEST);
+
+        }
+        // validation of Max_parts must be an integer
+        if (destination.getMessage().getMaxParts() == null || (destination.getMessage().getMaxParts() % 1) != 0) {
+            return new ResponseEntity<ErrorResponse>(
+                    new ErrorResponse(requestId,
+                            "max_parts parameter must be an integer number / should not be null value.", "failed"),
+                    HttpStatus.BAD_REQUEST);
+        }
+        // Max_parts must not be null or less than 1.
+        else if (destination.getMessage().getMaxParts() == null || destination.getMessage().getMaxParts() < 1) {
+            return new ResponseEntity<ErrorResponse>(new ErrorResponse(requestId,
+                    "Max number of parts to send the message should not be less then one.", "failed"),
+                    HttpStatus.BAD_REQUEST);
+        }
+        // message parameter validation, if the message parameters is not provided then
+        // use message_binary.
+
+        if (destination.getMessage().getMessage() == null || destination.getMessage().getMessage().isEmpty()) {
+            if ((destination.getMessage().getMessageBinary() == null)
+                    || destination.getMessage().getMessageBinary().isEmpty()) {
+                return new ResponseEntity<ErrorResponse>(
+                        new ErrorResponse(requestId, "Message/Message_binary is missing.", "failed"),
+                        HttpStatus.BAD_REQUEST);
+            } else if ((destination.getMessage().getMessageBinary() != null)) {
+                String binaryMessage = destination.getMessage().getMessageBinary();
+                String binaryPattern = "(1*0*)*";
+                {
+                    if (!Pattern.compile(binaryPattern).matcher(binaryMessage).matches()) {
+                        return new ResponseEntity<ErrorResponse>(new ErrorResponse(requestId,
+                                "Message_binary format is wrong/value not provided.", "failed"),
+                                HttpStatus.BAD_REQUEST);
+
+                    }
+                }
+                if (Pattern.compile(binaryPattern).matcher(binaryMessage).matches()) {
+                    // Encoded as base64
+                    Base64.Encoder encoder = Base64.getEncoder();
+                    byte[] encoded = encoder.encode(binaryMessage.getBytes());
+                    logger.info("base65 encoded parameters {}", encoded);
+                    // length of a message_binary
+                    int length = new String(encoded).length();
+                    logger.info("Length of a message_binary {}", length);
+                }
+            }
+        }
+
+        ResponseEntity<ErrorResponse> msgType = validateMessageType(destination, requestId);
+        if (msgType != null) {
+            return msgType;
+        }
+
+        try {
+            // sending message to RabbitMQ
+            String token = authenticationFilter.extractToken(request);
+            ClientConnectionRest clientConnectionRest = clientConnectionRestRepository.findByToken(token);
+
+            if (clientConnectionRest != null) {
+                destination.setRouteId(clientConnectionRest.getRouteId());
+                destination.setClientConnectionId(clientConnectionRest.getClientConnectionId());
+                destination.setClientId(clientConnectionRest.getClientId());
+                destination.setDeliveryReport(clientConnectionRest.getDeliveryReport());
+            }
+            RabbitMQConfig smsConfig = httpInSenderRabbitMQConfig.getSms();
+            rabbitTemplate.convertAndSend(smsConfig.getExchange(), smsConfig.getRoutingKey(), destination, m -> {
+                m.getMessageProperties().getHeaders().put("x-haud-request-uuid", requestId);
+                return m;
+            });
+            logger.info("SMS Message sent to {} exchange : {}", smsConfig.getExchange(), destination);
+            httpInStatsHandler.getRabbitMQStats().incrementSmsSentStats(1);
+        } catch (Exception ex) {
+            reason = ex.getMessage();
+            logger.error("Exception in sending Message into RabbitMQ", ex);
+            httpInStatsHandler.getRabbitMQStats().getDisconnectionsOrExceptionsStats().increment();
+            Utils.incrementRabbitMQErrorStats(httpInStatsHandler);
+        }
+        return new ResponseEntity<com.haud.xchange.http_in.response.dto.Destination>(
+                prepareResponse(reason, destination, requestId), HttpStatus.ACCEPTED);
+
+    }
+
+    /**
+     * Validate received message type in http request
+     * 
+     * @param destination
+     * @param requestId
+     * @return Response entity
+     */
+    public ResponseEntity<ErrorResponse> validateMessageType(Destination destination, UUID requestId) {
+        // length of UDH,message and gsm7
+        Message message = destination.getMessage();
+        Encoding encoding = message.getEncoding();
+        if (encoding == null || encoding.toString().equals(" ")) {
+            return new ResponseEntity<>(new ErrorResponse(requestId, "Encoding parameter is missing.", "failed"),
+                    HttpStatus.BAD_REQUEST);
+
+        } else if (destination.getMessage().getMessageUdh() != null) {
+
+            // message length
+            int msgLength = message.getMessage().length();
+            logger.info("Length of a message {}", msgLength);
+            String msgUDH = message.getMessageUdh();
+            if (msgUDH.length() >= 2) {
+                String udhl = msgUDH.substring(0, 2);
+
+                logger.info("substring {}", udhl);
+
+                byte[] byteArray = udhl.getBytes();
+                logger.info("byteArray {}", byteArray);
+                // udh 2byte length converted into integer
+                int udhlValue = ByteBuffer.wrap(byteArray).getShort();
+                logger.info("conversion of byte to integer {}", udhlValue);
+
+                if (encoding == Encoding.gsm7) {
+                    // gsm length
+                    int gsmMessageSize = ((140 - udhlValue) * 8) / 7;
+
+                    if (msgLength == gsmMessageSize && (!message.getMessage().matches(
+                            "[^A-Za-z0-9 \\\\r\\\\n@£$¥èéùìòÇØøÅå\\u0394_\\u03A6\\u0393\\u039B\\u03A9\\u03A0\\u03A8\\u03A3\\u0398\\u039EÆæßÉ!\\\"#$%&amp;'()*+,./:;&lt;=&gt;?¡ÄÖÑÜ§¿äöñüà^{}\\\\\\\\\\\\[~\\\\]|\\u20AC]*")
+                            || message.getMessage().isEmpty())) {
+                        return new ResponseEntity<>(
+                                new ErrorResponse(requestId, "GSM7 messages are not found to be correct.", "failed"),
+                                HttpStatus.BAD_REQUEST);
+                    }
+                } else if (encoding == Encoding.ucs2) {
+                    int udhlUcs2Value = ByteBuffer.wrap(byteArray).getShort();
+                    logger.info("conversion of byte to integer {}", udhlUcs2Value);
+                    int ucsMessageSize = (140 - udhlUcs2Value);
+                    if (msgLength != ucsMessageSize) {
+                        return new ResponseEntity<>(new ErrorResponse(requestId,
+                                "UCS2 message length is not found to be correct.", "failed"), HttpStatus.BAD_REQUEST);
+                    }
+
+                } else if (encoding == Encoding.binary) {
+                    int binaryMessageLength = (140 - udhlValue);
+                    logger.info("binaryMessageLength {}", binaryMessageLength);
+                    if (msgLength != binaryMessageLength) {
+                        return new ResponseEntity<>(new ErrorResponse(requestId,
+                                "Binary message length is not found to be correct.", "failed"), HttpStatus.BAD_REQUEST);
+                    }
+                } else if (encoding == Encoding.auto) {
+                    try {
+                        String autoMessage = new String(message.getMessage().getBytes("UTF-8"), "ISO-8859-1");
+                        logger.info("autoMessage {}", autoMessage);
+                    } catch (UnsupportedEncodingException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    return new ResponseEntity<>(new ErrorResponse(requestId, "Encoding type is missing.", "failed"),
+                            HttpStatus.BAD_REQUEST);
+
+                }
+            }
+        }
+        return null;
+
+    }
+
+    /**
+     * Prepare response to send back to http client
+     * 
+     * @param reason
+     * @param request
+     * @param requestId
+     * @return
+     */
+    private com.haud.xchange.http_in.response.dto.Destination prepareResponse(String reason, Destination request,
+            UUID requestId) {
+
+        com.haud.xchange.http_in.response.dto.Destination response = new com.haud.xchange.http_in.response.dto.Destination();
+        List<Destinations> reqDestinations = request.getDestinations();
+        try {
+            response.setRequestId(requestId);
+            if (reason == null) {
+                response.getResult().setStatus(Status.success);
+            } else {
+                response.getResult().setStatus(Status.failed);
+                response.getResult().setReason(reason);
+            }
+            reqDestinations.forEach(reqDestination -> {
+                com.haud.xchange.http_in.response.dto.Destinations respDestinations = new com.haud.xchange.http_in.response.dto.Destinations();
+                respDestinations.setDestinationId(reqDestination.getDestinationID());
+                respDestinations.setNumber(reqDestination.getNumber());
+                if (reason == null) {
+                    respDestinations.setStatus(Status.success);
+                } else {
+                    respDestinations.setStatus(Status.failed);
+                    respDestinations.setStatusReason(reason);
+                }
+
+                respDestinations.setMessageId(UUID.randomUUID());
+                response.getDestinations().add(respDestinations);
+            });
+
+        } catch (Exception ex) {
+            logger.error("Exception while preparing the the http response");
+        }
+        return response;
+    }
+
+
+    
+    @PostMapping("/test")
+    public String changeListener(@RequestBody String queue) {
+        System.out.println(queue);
+
+        
+        Map<String, RedisConnectionInfo> clientsInfo = HttpInRedisConfig.getRedissonClientsInfo();
+
+        for (Map.Entry<String, RedisConnectionInfo> entry : clientsInfo.entrySet()) {
+
+            RedisConnectionInfo connInfo = entry.getValue();
+            boolean status = connInfo.getStatus().get();
+            logger.info("Status: [{}]", status);
+            try {
+                if(status) {
+                    //byte[] data = repo.get(queue, connInfo.getRedissonClient(), appStats);
+                    //logger.info("Got Data: [{}]", data);
+                    repo.set(queuesListKey, queue.getBytes(),   connInfo.getRedissonClient());
+                }
+            } catch(Exception ex) {
+                ex.printStackTrace();
+                logger.error(ex.getMessage());
+            }
+
+        }
+        return queue;
+
+    }
+    
+    @GetMapping("/post")
+    public String getUrl(@RequestParam String url) {
+    	return url;
+    }
+}

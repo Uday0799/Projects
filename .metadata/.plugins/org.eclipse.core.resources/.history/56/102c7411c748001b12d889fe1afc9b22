@@ -1,0 +1,5 @@
+package com.haud.xchange.http_in.services;
+
+public class HttpInPostService {
+
+}

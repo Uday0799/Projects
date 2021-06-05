@@ -1,0 +1,35 @@
+package com.haud.xchange.http_in.services;
+
+
+
+@Service
+public class HttpInPostService {
+	private final RestTemplate restTemplate;
+	
+	
+	public HttpInPostService( RestTemplateBuilder restTemplateBuilder) {
+		this.restTemplate = restTemplateBuilder.build();
+	}
+	
+	public class Post  {
+		
+		public Post createPostWithObject(String url) {
+			HttpHeaders headers = new HttpHeaders();
+			
+			//setting content type header
+			headers.setContentType(MediaType.APPLICATION_JSON);
+			
+			//setting accept header
+			headers.setAccept(Collections.singletonList(MediaType.APPLICATION_JSON));
+			
+			Post post = new Post();
+			
+			//building a post request
+			HttpEntity<Post> entity = new HttpEntity<>(post,headers);
+			
+			// sending a POST request
+			return restTemplate.postForObject(url,entity,Post.class);
+			
+		}
+	}
+}
